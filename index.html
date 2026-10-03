@@ -1710,7 +1710,7 @@ const OVL_CACHE = new Map();
 PH.overlay = () => null; PH.overlay_expr = () => null;          // generated lazily (ovlSheet) instead of at boot
 const SLOT_ORDER = ["back", "outfit", "acc", "hand"];
 const itemDef = k => OVERLAY_DEFS[k] || null;
-function equippedItems(id) { const e = S.chars[id].equip; return SLOT_ORDER.map(s => e[s]).filter(k => k && PRIZES[k] && itemDef(k)); }
+function equippedItems(id) { const e = S.chars[id].equip, pv = typeof pvWorn === "function" && pvWorn(id); return SLOT_ORDER.map(s => e[s]).filter(k => k && PRIZES[k] && itemDef(k) && !(pv && slotOf(k) === "outfit")); }   // a worn private outfit replaces the public outfit slot
 // sheet for (item, girl, kind = "walk" | "expr"); null => no overlay available for that kind
 function ovlSheet(item, girl, kind) {
   const key = "ovl_" + item + "_" + girl + (kind === "expr" ? "_expr" : "");
@@ -1722,7 +1722,7 @@ function ovlSheet(item, girl, kind) {
   OVL_CACHE.set(key, c); return c;
 }
 // Can we show expression frames while these items are worn? (needs an expr overlay for each item)
-function exprOk(id) { return equippedItems(id).every(k => ovlSheet(k, id, "expr")); }
+function exprOk(id) { if (typeof pvWorn === "function" && pvWorn(id)) return false; return equippedItems(id).every(k => ovlSheet(k, id, "expr")); }   // private overlays have walk frames only
 function rainbowOf(img, key) { const t = RAINBOW[Math.floor(performance.now() / 220) % RAINBOW.length], ck = key + "|rb|" + t;
   let c = TINT_CACHE.get(ck); if (!c) { const [cv2, g2] = mkCanvas(img.width, img.height); g2.drawImage(img, 0, 0); g2.globalCompositeOperation = "source-atop"; g2.globalAlpha = 0.5; px(g2, 0, 0, img.width, img.height, t); TINT_CACHE.set(ck, c = cv2); } return c; }
 // Draw base frame + overlays. kind: "walk" | "expr"; (sx, sy) = frame origin in the base sheet; dir 0..3 (row) for layer order.
@@ -1733,6 +1733,7 @@ function drawDressed(g, id, kind, sx, sy, X, Y, dir, opts) {
     g.drawImage(sh, sx, sy, 48, 48, X, Y, w, w); };
   items.forEach(k => one(k, false));
   g.drawImage(base, sx, sy, 48, 48, X, Y, w, w);
+  const pv = kind === "walk" && typeof pvWorn === "function" && pvWorn(id); if (pv) g.drawImage(PV.img[pv + "_" + id], sx, sy, 48, 48, X, Y, w, w);   // private outfit layer (memory-only)
   items.forEach(k => one(k, true));
 }
 // Silhouette (dark) version for locked slots
@@ -2716,12 +2717,22 @@ function wardrobe(id) {
   const tabs = h("div", { cls: "tabs" }, IDS.map(g2 => h("button", { cls: g2 === id ? "" : "alt", onclick: () => wardrobe(g2) }, CH[g2].name)));
   const petInfo = eq.pet && S.pets[eq.pet] ? (() => { const pv = S.pets[eq.pet], P = PETS[eq.pet], nx = PET_STAGE_EXP[pv.stage];
     return h("div", { cls: "small" }, `${P.names[pv.stage - 1]} — ${P.desc} Action: ${P.action.name}. EXP ${pv.exp}${pv.stage < 3 ? "/" + nx + " to evolve" : " (max stage)"}`); })() : h("div", { cls: "small" }, petOpts.length ? "Pick a pet to follow her around and help in battle." : "No pets yet — pull the gacha for fantasy pets!");
-  const body = h("div", null, tabs, h("div", { cls: "dlg" }, portrait(id), h("div", null, sel("outfit", "outfit", "👗 Outfit"), sel("acc", "acc", "🎀 Head"), sel("back", "back", "🦇 Back"), sel("hand", "hand", "🍬 Hand"), h("div", { cls: "item" }, h("span", null, "🐾 Pet"), petSel), petInfo)));
-  body.querySelectorAll("select").forEach(s => s.addEventListener("change", () => equip(id, s.dataset.slot, s.value)));
+  const body = h("div", null, tabs, h("div", { cls: "dlg" }, portrait(id), h("div", null, sel("outfit", "outfit", "👗 Outfit"), sel("acc", "acc", "🎀 Head"), sel("back", "back", "🦇 Back"), sel("hand", "hand", "🍬 Hand"), h("div", { cls: "item" }, h("span", null, "🐾 Pet"), petSel), pvRow(id), petInfo)));
+  body.querySelectorAll("select[data-slot]").forEach(s => s.addEventListener("change", () => equip(id, s.dataset.slot, s.value)));
   const btns = [];
   if (eq.pet && S.pets[eq.pet]) btns.push({ label: "🍪 Feed pet", cls: "mint", fn: () => feedPet(id) });
   btns.push({ label: "◀ Back", cls: "alt", fn: () => ENT[id] && ENT[id].room === view ? openCharMenu(id) : closeModal() }, closeBtn);
   openModal("👗 Wardrobe", body, btns, id);
+}
+// 🔒 private outfits row: invisible unless Supabase is configured; names appear only after sign-in, owned outfits only
+function pvRow(id) {
+  if (typeof spCfg !== "function" || !spCfg()) return null;
+  if (!pvReady()) return h("div", { cls: "item", id: "pvRow" }, h("span", null, "🔒 Private"), h("button", { cls: "alt small", id: "pvOpenSignIn", onclick: () => openModal("🔒 Private wardrobe", pvSignInForm(() => wardrobe(id)), [{ label: "◀ Back", cls: "alt", fn: () => wardrobe(id) }], id) }, PV.loading ? "loading…" : "🔐 Sign in"));
+  const own = pvOwnedList();
+  if (!own.length) return h("div", { cls: "item", id: "pvRow" }, h("span", null, "🔒 Private"), h("span", { cls: "small" }, "none owned yet (buy them in Money Corner)"));
+  const s = h("select", { "data-pv": "1", id: "pvSelect" }, h("option", { value: "" }, "— none —"), own.map(o => { const op = h("option", { value: o.id }, o.name + (PV.img[o.id + "_" + id] ? "" : " (art soon)")); if (PV.equip[id] === o.id) op.selected = true; return op; }));
+  s.addEventListener("change", () => { pvEquip(id, s.value); react(id, s.value ? "sparkle" : "question", s.value ? "blush" : "surprised", 2); if (s.value) say(id, pick(["Just for you 💕", "Shh, it's our secret~", "Do I look cute? 💕"]), 2.5); wardrobe(id); });
+  return h("div", { cls: "item", id: "pvRow" }, h("span", null, "🔒 Private"), s);
 }
 function equip(id, slot, val) {
   const eq = S.chars[id].equip;
@@ -4047,7 +4058,8 @@ async function spSignIn(email, password) {
   const r = await fetch(cfg.url + "/auth/v1/token?grant_type=password", { method: "POST", headers: { apikey: cfg.key, "Content-Type": "application/json" }, body: JSON.stringify({ email, password }), credentials: "omit", cache: "no-store" });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.access_token) throw new Error(j.error_description || j.msg || j.message || "Sign-in failed (" + r.status + ")");
-  SP.session = { access_token: j.access_token, refresh_token: j.refresh_token || "", expires_at: Date.now() + (j.expires_in || 3600) * 1000, email: (j.user && j.user.email) || email };
+  SP.session = { access_token: j.access_token, refresh_token: j.refresh_token || "", expires_at: Date.now() + (j.expires_in || 3600) * 1000, email: (j.user && j.user.email) || email, uid: (j.user && j.user.id) || "" };
+  if (typeof pvLoad === "function") pvLoad();   // shared private wardrobe loads with the same login
 }
 async function spRefresh() { const cfg = spCfg(); if (!SP.session || !SP.session.refresh_token) return false;
   const r = await fetch(cfg.url + "/auth/v1/token?grant_type=refresh_token", { method: "POST", headers: { apikey: cfg.key, "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: SP.session.refresh_token }), credentials: "omit", cache: "no-store" });
@@ -4062,7 +4074,7 @@ async function spFetchRows() {
 }
 function spSignOut() { const cfg = spCfg(), tok = SP.session && SP.session.access_token;
   if (cfg && tok) fetch(cfg.url + "/auth/v1/logout", { method: "POST", headers: { apikey: cfg.key, Authorization: "Bearer " + tok }, credentials: "omit" }).catch(() => {});
-  SP.session = null; SP.rows = null; SP.mode = "none"; SP.err = ""; SP.tip = 0; }
+  SP.session = null; SP.rows = null; SP.mode = "none"; SP.err = ""; SP.tip = 0; if (typeof pvClear === "function") pvClear(); }
 // ---- UI ----
 function mcTabs(active) { return h("div", { cls: "mctabs" },
   h("button", { cls: active === "corner" ? "on" : "alt", onclick: () => { if (active !== "corner") { closeMoneyCorner(); openMoneyCorner(); } } }, "💰 Corner"),
@@ -4106,6 +4118,61 @@ function openSpending() {
 // test hook (debug builds only; exposes nothing private: just the current in-memory view state)
 const spState = () => ({ mode: SP.mode, signedIn: !!SP.session, rows: SP.rows ? SP.rows.length : 0 });
 
+// ===== private_wardrobe.js =====
+// Shared PRIVATE wardrobe (with Moneko's Money Corner). PRIVACY: this file ships publicly but holds NO private names or art.
+// After Miguel signs in (spending tab or wardrobe), it reads with his token:
+//   public.private_outfit_catalog (RLS owner-only)  -> names + overlay paths per girl
+//   public.shared_wardrobe        (RLS owner-only)  -> what he bought (in Money Corner or here)
+//   storage bucket private-outfits (owner-only read) -> cozy/<id>_<girl>.png overlays (192x192, same 4x4 grid as <girl>_walk)
+// Everything stays in memory (never S, localStorage, the COZY: export or the cloud save) and is wiped on sign-out / reload.
+const PV = { catalog: [], owned: [], equip: {}, img: {}, loaded: false, loading: false, err: "", urls: [] };
+const PV_GIRLS = ["mochi", "moneko", "kiri", "yume"];
+const pvReady = () => !!(SP.session && PV.loaded);
+const pvOutfit = k => PV.catalog.find(o => o.id === k);
+const pvOwnedList = () => PV.catalog.filter(o => PV.owned.includes(o.id));
+function pvHeaders() { return { apikey: spCfg().key, Authorization: "Bearer " + SP.session.access_token, Accept: "application/json" }; }
+async function pvJSON(path) {
+  const cfg = spCfg(); if (SP.session.expires_at - Date.now() < 60000) await spRefresh();
+  let r = await fetch(cfg.url + path, { headers: pvHeaders(), credentials: "omit", cache: "no-store" });
+  if (r.status === 401 && await spRefresh()) r = await fetch(cfg.url + path, { headers: pvHeaders(), credentials: "omit", cache: "no-store" });
+  if (!r.ok) throw new Error("private wardrobe (" + r.status + ")"); return r.json();
+}
+async function pvImage(path) {
+  if (!path) return null; const cfg = spCfg();
+  const r = await fetch(cfg.url + "/storage/v1/object/authenticated/private-outfits/" + path.split("/").map(encodeURIComponent).join("/"), { headers: Object.assign(pvHeaders(), { Accept: "image/png" }), credentials: "omit", cache: "no-store" }).catch(() => null);
+  if (!r || !r.ok) return null; const u = URL.createObjectURL(await r.blob()); PV.urls.push(u);
+  return await new Promise(res => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = u; });
+}
+let pvPending = null;   // one shared load: callers that arrive mid-load await the same promise
+function pvLoad() { if (!SP.session) return Promise.resolve(); if (!pvPending) pvPending = pvLoadOnce().finally(() => { pvPending = null; }); return pvPending; }
+async function pvLoadOnce() {
+  PV.loading = true; PV.err = "";
+  try {
+    const rows = await pvJSON("/rest/v1/private_outfit_catalog?select=id,name,sheets,sort&active=is.true&order=sort.asc");
+    const own = await pvJSON("/rest/v1/shared_wardrobe?select=outfit_id");
+    if (!SP.session) return;
+    PV.catalog = rows.map(r => ({ id: String(r.id), name: String(r.name || r.id), sheets: r.sheets || {} }));
+    PV.owned = own.map(r => String(r.outfit_id)).filter(k => pvOutfit(k)); PV.loaded = true;
+    await Promise.all(pvOwnedList().flatMap(o => PV_GIRLS.map(async g => { const im = await pvImage(o.sheets[g]); if (im && SP.session) PV.img[o.id + "_" + g] = im; })));   // only owned outfits are downloaded
+    if (!SP.session) pvClear();
+  } catch (e) { PV.err = String(e.message || e); } finally { PV.loading = false; }
+}
+function pvClear() { PV.urls.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) {} }); Object.assign(PV, { catalog: [], owned: [], equip: {}, img: {}, loaded: false, err: "", urls: [] }); }
+// the private outfit a girl is wearing right now (null if none / signed out / art not downloaded)
+function pvWorn(girl) { if (!pvReady()) return null; const k = PV.equip[girl]; return k && PV.owned.includes(k) && PV.img[k + "_" + girl] ? k : null; }
+function pvEquip(girl, k) { if (k && !PV.owned.includes(k)) return false; PV.equip[girl] = k || ""; return true; }
+// small inline sign-in for the wardrobe (same Supabase email/password login as the spending tab)
+function pvSignInForm(after) {
+  const email = h("input", { type: "email", id: "pvEmail", placeholder: "email", autocomplete: "username", required: "" }), pass = h("input", { type: "password", id: "pvPass", placeholder: "password", autocomplete: "current-password", required: "" });
+  const go = h("button", { type: "submit", id: "pvSignIn" }, "🔐 Sign in"), err = h("div", { cls: "sperr", id: "pvErr" }, PV.err || "");
+  const f = h("form", { cls: "spform", id: "pvForm" }, h("div", { cls: "small" }, "Private outfits: Miguel only. Loaded after sign-in, kept in memory only."), email, pass, go, err);
+  f.addEventListener("submit", async e => { e.preventDefault(); go.disabled = true; go.textContent = "Signing in…";
+    try { await spSignIn(email.value.trim(), pass.value); pass.value = ""; await pvLoad(); } catch (x) { PV.err = String(x.message || x); }
+    after(); });
+  return f;
+}
+const pvState = () => ({ ready: pvReady(), owned: PV.owned.length, catalog: PV.catalog.length, imgs: Object.keys(PV.img).length, worn: Object.fromEntries(PV_GIRLS.map(g => [g, pvWorn(g)])), loading: PV.loading, err: PV.err });
+
 // ===== main.js =====
 // Main loop + boot.
 let last = performance.now(), hidden = false;
@@ -4138,7 +4205,7 @@ if (DEBUG) window.CozyGame = {
   // v3
   goSquare, tickGarden, plantCrop, waterPlot, fertilize, harvest, cropStage, openPlot, FISHING, castLine, fishTap, catchFish, rollFish, fishAvailable, openPond,
   marketPrice, priceHistory, sellItem, buySeed, buySupply, openMarket, openArcade, startRhythm, RHY, finishRhythm, startCards, cardAttack, CB, cardCollection, startTrivia, TRV, arcadeCoins,
-  openTower, towerZone, towerFight, openMoneyCorner, openSpending, spendingAdvice, spAggregate, normCat, spState, SPENDING_EXAMPLE, coinRainTap, mcMood, mcGreen, mcGardenStage, stickerBook, checkAchievements, activeEvent, eventZone, openEvent, evState,
+  openTower, towerZone, towerFight, openMoneyCorner, openSpending, spendingAdvice, spAggregate, normCat, spState, pvState, pvEquip, wardrobe, SPENDING_EXAMPLE, coinRainTap, mcMood, mcGreen, mcGardenStage, stickerBook, checkAchievements, activeEvent, eventZone, openEvent, evState,
   ovlSheet, drawDressed, equippedItems, hit, problemOf, CASE_SLOTS, priceOnDay, dayIndex, towerCheckpoints, nextProblemId, openProblem, answerProblem, PROBLEM_POOLS, ownsPrize, endBattle, SQ, squareClick, STREET_TO_SQUARE,
   logicalToClient(x, y) { const r = cv.getBoundingClientRect(); return { x: r.left + x / W * r.width, y: r.top + y / H * r.height }; }, get view() { return view; },
 };
